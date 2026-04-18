@@ -1,7 +1,7 @@
 ---
 name: unbridled
 description: Send and read messages on Facebook Messenger, WhatsApp, Instagram, LinkedIn, Twitter/X, Signal, Telegram, Discord and other networks through a Beeper account, using the cloud Matrix bridges (hungryserv). Installs bbctl, sets up E2EE with matrix-nio, bootstraps cross-signing from the user's Beeper recovery key, runs a long-running sync daemon for incoming decryption, and exposes a single Python wrapper to list/search/send/read chats across all bridged networks.
-version: 0.1.0
+version: 0.2.0
 author: clawd + jeremie
 homepage: https://github.com/jkobject/unbridled
 tags: [messaging, beeper, matrix, e2ee, facebook-messenger, whatsapp, instagram, linkedin, multi-platform]
