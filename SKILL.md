@@ -26,10 +26,12 @@ agent / clawd
     │
     │ CLI / Python import
     ▼
-scripts/beeper/
+scripts/
     ├── nio_client.py          ← async send / list / history (E2EE)
     ├── client.py              ← sync HTTP wrapper (no e2ee; list + bridge state)
     ├── bootstrap_crosssign.py ← one-shot: recovery key → cross-sign device
+    ├── import_key_backup.py   ← one-shot: recovery key → import Megolm key backup
+    ├── sync_daemon.py         ← long-running sync (systemd) → new Megolm sessions
     └── verify_interactive.py  ← fallback: SAS verification via Beeper Desktop
     ▼
 bbctl + access token (~/.config/bbctl/config.json)
@@ -162,11 +164,13 @@ Re-run it after any `bbctl login` that issued a new device id.
 
 ## Daily usage
 
-All commands run inside the venv:
+All commands run inside the venv. `$SKILL_DIR` is wherever this skill is
+installed (e.g. `~/.openclaw/workspace/skills/unbridled` when installed via
+ClawHub, or the repo root if cloned from GitHub).
 
 ```bash
 NIO=~/.venvs/beeper/bin/python
-SCRIPT=~/.openclaw/workspace/scripts/beeper/nio_client.py
+SCRIPT="$SKILL_DIR/scripts/nio_client.py"
 
 # Identity check
 $NIO $SCRIPT whoami
@@ -182,15 +186,15 @@ $NIO $SCRIPT list-chats --network linkedin
 # Send a message (E2EE handled automatically)
 $NIO $SCRIPT send --room '!xxx:beeper.local' --text "Hello from clawd"
 
-# Read recent history in a room (requires megolm session; may be empty on first run)
+# Read recent history in a room (requires megolm session in the store)
 $NIO $SCRIPT history --room '!xxx:beeper.local' --limit 20
 ```
 
 Python import usage (recommended for cron / scripts):
 
 ```python
-import sys, asyncio
-sys.path.insert(0, "/home/ubuntu/.openclaw/workspace/scripts/beeper")
+import os, sys, asyncio
+sys.path.insert(0, os.path.expanduser(os.environ["SKILL_DIR"]) + "/scripts")
 from nio_client import make_client
 
 async def ping():
@@ -216,11 +220,30 @@ asyncio.run(ping())
 
 ## Safety rules for the agent
 
-- Never send a DM on a new thread without explicit user confirmation.
-- Never mass-send or loop over contacts.
-- In group chats, the agent is not the user's voice — stay silent unless directly asked.
-- Log every outgoing send in the workspace journal so the user can audit.
-- If the user revokes the Beeper session (logout device), the Olm store becomes stale — re-run `bootstrap_crosssign.py` after a new `bbctl login`.
+This skill gives the agent direct write access to the user's personal chats
+on every bridged network. The agent MUST treat every `send` as a privileged
+operation:
+
+- **Never send a DM on a new thread without explicit user confirmation.**
+  One-line acks like "go ahead" count; inferred intent does not.
+- **Never mass-send or loop over contacts.** Even mundane messages become
+  spam at N≥3 recipients; users get banned from WhatsApp / Messenger for this.
+- **In group chats, the agent is not the user's voice.** Stay silent unless
+  directly addressed by name. If unsure, don't post.
+- **Never paraphrase emotional/sensitive messages on the user's behalf** —
+  show the draft to the user first and let them approve or rewrite.
+- **Never forward messages from one private thread into another** without
+  explicit permission.
+- **Log every outgoing send** in the workspace journal (e.g.
+  `memory/YYYY-MM-DD.md`) so the user can audit after the fact.
+- **Respect quiet hours.** Midnight sends look like the user is chaotic,
+  not like an assistant is helpful.
+- **Never share or paste the recovery key, access token, or Olm store path**
+  in any external output (message bodies, issues, logs the user didn't ask
+  for). These are the keys to the whole kingdom.
+- **If the user revokes the Beeper session** (logout device), the Olm store
+  becomes stale — re-run `bootstrap_crosssign.py` and `import_key_backup.py`
+  after the next `bbctl login`.
 
 ## Files in this skill
 
