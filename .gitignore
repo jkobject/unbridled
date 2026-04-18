@@ -1,0 +1,27 @@
+# Secrets — NEVER commit
+*.secret
+*-token*
+*recovery-key*
+.env
+.secrets/
+
+# Local state
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.venvs/
+
+# Generated digests
+digest.md
+collect-beeper-*.md
+/tmp/
+
+# macOS junk
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo

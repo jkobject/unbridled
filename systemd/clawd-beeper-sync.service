@@ -1,0 +1,19 @@
+[Unit]
+Description=Clawd Beeper Matrix sync daemon (accumulates Megolm group sessions for decryption)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/.venvs/beeper/bin/python %h/.openclaw/workspace/scripts/beeper/sync_daemon.py
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=20s
+MemoryMax=512M
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=clawd-beeper-sync
+
+[Install]
+WantedBy=default.target
