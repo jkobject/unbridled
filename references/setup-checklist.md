@@ -34,12 +34,20 @@
    ```
    🎉 SUCCESS — device is now cross-signed. Bridge should accept our messages.
    ```
-7. Quick smoke test on a **real chat with a real other user** (not "notes to self"):
+7. `python import_key_backup.py` — downloads the Matrix key backup, decrypts all stored Megolm group sessions with the recovery key, and writes them into the nio Olm store. Required for reading historical messages. Stop the sync daemon first if it's running (it locks the sqlite store):
+   ```bash
+   systemctl --user stop clawd-beeper-sync 2>/dev/null || true
+   python import_key_backup.py
+   systemctl --user start clawd-beeper-sync 2>/dev/null || true
+   ```
+   Expected: `✓ Imported N sessions into ~/.local/share/clawd-matrix/`.
+8. Quick smoke test on a **real chat with a real other user** (not "notes to self"):
    ```bash
    python nio_client.py list-chats --network messenger --limit 5
    python nio_client.py send --room '!xxx:beeper.local' --text "pipeline check from <agent>"
+   python nio_client.py history --room '!xxx:beeper.local' --limit 10
    ```
-8. User confirms message arrived on Messenger.
+9. User confirms message arrived on Messenger and that `history` shows real text (not `[encrypted — …]`).
 
 ## Rollback / cleanup
 

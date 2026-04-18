@@ -164,27 +164,30 @@ async def cmd_whoami(args) -> int:
 
 
 async def cmd_list_chats(args) -> int:
+    """Beeper hungryserv does lazy sync so client.rooms is mostly empty. Iterate
+    the authoritative joined_rooms() list instead and fetch m.bridge state per room.
+    """
     client = await make_client()
     try:
-        await sync_once(client, timeout_ms=10000)
+        # One sync to keep olm/device state fresh; we don't rely on client.rooms
+        await sync_once(client, timeout_ms=5000)
+        joined = await client.joined_rooms()
+        room_ids = getattr(joined, "rooms", None) or []
         target = NETWORK_ALIASES.get((args.network or "").lower(), args.network)
         results = []
-        for room_id, room in client.rooms.items():
-            # m.bridge state is in room.room_state but nio doesn't index arbitrary state events
-            # by default. We'll re-fetch state once.
+        for room_id in room_ids:
             state = await client.room_get_state_event(room_id, "m.bridge", "")
-            if hasattr(state, "content"):
-                info = state.content
-            else:
+            if not hasattr(state, "content"):
                 continue
+            info = state.content or {}
             bridge = info.get("com.beeper.bridge_name") or info.get("protocol", {}).get("id")
             if target and bridge != target:
                 continue
-            chan = info.get("channel", {})
+            chan = info.get("channel", {}) or {}
             results.append({
                 "room_id": room_id,
                 "network": bridge,
-                "name": chan.get("displayname") or room.display_name,
+                "name": chan.get("displayname") or room_id,
                 "external_id": chan.get("id"),
             })
             if len(results) >= args.limit:
@@ -263,11 +266,26 @@ async def cmd_send(args) -> int:
 async def cmd_history(args) -> int:
     client = await make_client()
     try:
-        await sync_once(client, timeout_ms=10000)
-        room = client.rooms.get(args.room)
-        if room is None:
+        # Authoritative membership check (before any sync; matches send pattern)
+        joined = await client.joined_rooms()
+        room_list = getattr(joined, "rooms", None)
+        if room_list is None or args.room not in room_list:
             print(f"Room {args.room} not in joined rooms.", file=sys.stderr)
             return 1
+
+        # Sync AFTER to prime olm / group sessions
+        await sync_once(client, timeout_ms=10000)
+
+        # Inject MatrixRoom to workaround lazy sync
+        from nio.rooms import MatrixRoom
+        if args.room not in client.rooms:
+            client.rooms[args.room] = MatrixRoom(args.room, client.user_id, encrypted=True)
+        members_resp = await client.joined_members(args.room)
+        if hasattr(members_resp, "members"):
+            for m in members_resp.members:
+                client.rooms[args.room].add_member(m.user_id, m.display_name, m.avatar_url)
+        if client.should_query_keys:
+            await client.keys_query()
 
         # Use pagination: messages endpoint via room_messages
         resp = await client.room_messages(
@@ -283,12 +301,27 @@ async def cmd_history(args) -> int:
                     "body": ev.body,
                 })
             elif isinstance(ev, MegolmEvent):
-                # Failed to decrypt — try once with key query
-                out.append({
-                    "ts": ev.server_timestamp,
-                    "sender": ev.sender,
-                    "body": "[encrypted — decryption failed]",
-                })
+                # Try to decrypt with the loaded store
+                try:
+                    decrypted = client.decrypt_event(ev)
+                    if isinstance(decrypted, RoomMessageText):
+                        out.append({
+                            "ts": decrypted.server_timestamp,
+                            "sender": decrypted.sender,
+                            "body": decrypted.body,
+                        })
+                    else:
+                        out.append({
+                            "ts": ev.server_timestamp,
+                            "sender": ev.sender,
+                            "body": f"[encrypted — {type(decrypted).__name__}]",
+                        })
+                except Exception as e:
+                    out.append({
+                        "ts": ev.server_timestamp,
+                        "sender": ev.sender,
+                        "body": f"[encrypted — {type(e).__name__}]",
+                    })
         if args.json:
             print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
         else:

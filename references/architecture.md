@@ -36,6 +36,8 @@
         │  scripts/beeper/│── nio_client.py ─── async CLI (send/list/history)
         │                 │── client.py ─────── sync HTTP (list, bridge state)
         │                 │── bootstrap_crosssign.py ── one-shot recovery-key → device signature
+        │                 │── import_key_backup.py  ─── one-shot recovery-key → decrypt + import Megolm backup
+        │                 │── sync_daemon.py ────── long-running sync; consumes new to_device events
         │                 │── verify_interactive.py ─── optional SAS fallback
         │                 │
         │  ~/.local/share │
@@ -118,6 +120,47 @@ The wrapper's approach:
 2. Manually build a `MatrixRoom` shell and `add_member` before `room_send` so nio's Megolm logic has what it needs.
 
 This is a **documented Beeper behavior**, not a bug on our side, and unlikely to change given hungryserv's scale constraints.
+
+## Reading history: why the key backup matters
+
+Cross-signing only fixes the *outgoing* path. For *incoming* history, every encrypted message references a Megolm group session by `session_id`. To decrypt a message, your device must have the corresponding `InboundGroupSession` in its Olm store.
+
+There are three ways a session can land there:
+
+1. **Delivered fresh via `to_device`** when your device is actively syncing at the moment the session is created or shared.
+2. **Forwarded on demand** via `m.room_key_request` — unreliable across bridges.
+3. **Restored from the Matrix key backup** — the one sure path for pre-existing history.
+
+### What `import_key_backup.py` does
+
+```
+recovery-key.txt
+   │ base58 decode + parity check
+   ▼
+32-byte SSSS seed
+   │ HKDF-SHA256(salt=32·0x00, info="m.megolm_backup.v1")
+   │ AES-CTR decrypt of m.megolm_backup.v1 account data
+   ▼
+32-byte Curve25519 backup private key  (matches public_key in /room_keys/version)
+   │
+   │ GET /_matrix/client/v3/room_keys/keys?version=<N>   ← all encrypted sessions
+   │ for each session_data { ephemeral, ciphertext, mac }:
+   │   x25519(backup_priv, ephemeral) → shared_secret
+   │   HKDF-SHA256(salt=0x00 [1 byte!], info="") → aes_key(32) || mac_key(32) || aes_iv(16)
+   │   HMAC-SHA256(mac_key, b"")[:8] == expected_mac     ← libolm bug: MAC of empty input
+   │   AES-256-CBC decrypt(ciphertext) + PKCS7 unpad → BackedUpRoomKey JSON
+   ▼
+InboundGroupSession.import_session(session_key, sender_fp, sender_key, room_id, ...)
+   │
+   ▼
+Olm.save_inbound_group_session(session)  → writes into the nio sqlite store
+```
+
+### Gotchas encoded in the script (do not regress)
+
+- HKDF `salt` for the backup pk_encryption derivation is a **single `0x00` byte**, not 32. Matrix spec pseudocode misleads here; the real vodozemac/libolm implementation uses 1 byte. SSSS key derivation (the *other* HKDF in `bootstrap_crosssign.py`) does use 32 zero bytes. Don't conflate them.
+- The backup MAC is a **known libolm bug**: `HMAC-SHA256(mac_key, b"")[:8]`, truncated to 8 bytes, computed on empty input instead of on the ciphertext. Required for compatibility; don't "fix" it.
+- Stop the `clawd-beeper-sync` daemon before importing; nio's sqlite store takes an exclusive lock and a concurrent import will either fail silently or corrupt rows.
 
 ## Why not self-hosted bridges (`bbctl run sh-meta`)?
 

@@ -2,7 +2,7 @@
 
 > Unified multi-platform messaging for AI agents — Messenger, WhatsApp, Instagram, LinkedIn, Twitter/X, Signal, Telegram, Discord — powered by Beeper's Matrix bridges, end-to-end encrypted, all from one Python client.
 
-![status: v0.1](https://img.shields.io/badge/status-v0.1-blue)
+![status: v0.2](https://img.shields.io/badge/status-v0.2-blue)
 ![license: MIT](https://img.shields.io/badge/license-MIT-green)
 ![runtime: python 3.10+](https://img.shields.io/badge/python-3.10+-blue)
 
@@ -16,8 +16,9 @@ It handles the unglamorous parts:
 
 - Olm / Megolm end-to-end encryption (via `matrix-nio`)
 - Bootstrapping cross-signing from the user's Beeper recovery key, so bridges actually trust your device
-- Beeper's lazy sync quirk (injecting rooms manually for `room_send`)
-- A long-running systemd daemon that accumulates inbound group sessions so you can decrypt incoming messages
+- Importing the full Matrix **key backup** (`m.megolm_backup.v1.curve25519-aes-sha2`) so incoming history decrypts out of the box
+- Beeper's lazy sync quirk (injecting rooms manually for `room_send`; iterating `joined_rooms()` instead of the half-empty `client.rooms`)
+- A long-running systemd daemon that accumulates fresh inbound group sessions so future messages decrypt without effort
 
 It's the thing I wanted to exist when I said to Clawd "send this on Messenger for me".
 
@@ -63,7 +64,9 @@ Everything Beeper bridges. Tested on:
       │  │ client       │   │  sync HTTP list-chats + bridge state
       │  │ bootstrap_   │   │  one-shot cross-signing from recovery key
       │  │   crosssign  │   │
-      │  │ sync_daemon  │   │  long-running sync → accumulates Megolm sessions
+      │  │ import_key_ │   │  one-shot: recovery key → download + decrypt
+      │  │   backup     │   │  the server-side Megolm backup into the store
+      │  │ sync_daemon  │   │  long-running sync → accumulates new Megolm sessions
       │  │ collect_     │   │  daily digest of active chats per network
       │  │   daily      │   │
       │  └──────────────┘   │
@@ -113,11 +116,17 @@ chmod 600 ~/.secrets/beeper-recovery-key.txt
 ~/.venvs/beeper/bin/python scripts/bootstrap_crosssign.py        # cross-signs
 #     Expected last line: 🎉 SUCCESS — device is now cross-signed.
 
-# 4. (Recommended) Install the long-running sync daemon for incoming decryption
+# 4. Import the Matrix key backup (required for reading history)
+#     Stop the daemon first if you already started it — it locks the sqlite store.
+systemctl --user stop clawd-beeper-sync 2>/dev/null || true
+~/.venvs/beeper/bin/python scripts/import_key_backup.py
+#     Expected: "✓ Imported N sessions into ~/.local/share/clawd-matrix/"
+
+# 5. (Recommended) Install the long-running sync daemon for incoming decryption
 bash systemd/install.sh
 systemctl --user status clawd-beeper-sync
 
-# 5. Smoke test — pick a chat you don't mind messaging
+# 6. Smoke test — pick a chat you don't mind messaging
 ~/.venvs/beeper/bin/python scripts/nio_client.py list-chats --network messenger --limit 10
 ~/.venvs/beeper/bin/python scripts/nio_client.py send --room '!xxx:beeper.local' --text "hi from unbridled"
 ```
@@ -161,18 +170,36 @@ async def ping():
 asyncio.run(ping())
 ```
 
-## The sync daemon explained
+## Inbound decryption: backup import + sync daemon
 
-Beeper enforces E2EE. Inbound messages arrive in encrypted form, and the decryption keys (Megolm group sessions) are only delivered to your device via `to_device` events when you're actively syncing. A short-lived script will miss most of them.
+Beeper enforces E2EE. Two complementary mechanisms feed Megolm group sessions into your local store:
 
-`scripts/sync_daemon.py` wraps `matrix-nio`'s `sync_forever` in a supervised loop with exponential backoff. Run it under systemd (unit provided in `systemd/clawd-beeper-sync.service`), and within a few minutes of starting, your `history` / `collect_beeper_daily` calls will decrypt nearly all new traffic.
+### 1. One-shot: import the Matrix key backup
+
+Beeper keeps a server-side, encrypted-at-rest backup of every Megolm session the user has ever held (algorithm `m.megolm_backup.v1.curve25519-aes-sha2`). `scripts/import_key_backup.py` downloads those, decrypts them with the recovery key (the same one you used for cross-signing), and writes each `InboundGroupSession` into the nio sqlite store.
+
+```bash
+systemctl --user stop clawd-beeper-sync 2>/dev/null || true
+~/.venvs/beeper/bin/python scripts/import_key_backup.py
+systemctl --user start clawd-beeper-sync
+```
+
+Run it once per device (after each new `bbctl login`). Typical coverage on an active account: **95%+** of joined rooms reachable for historical reads. The remaining gap is inactive rooms that simply have no session in the backup.
+
+### 2. Continuous: the sync daemon
+
+Future messages frequently reuse an already-known group session, so they decrypt fine on demand. But Megolm sessions rotate (new members, new rooms, bridge restarts), and the *new* session key is delivered via a single `to_device` event. Beeper only retains undelivered `to_device` events for a few days — so if nothing syncs during that window, those keys are lost.
+
+`scripts/sync_daemon.py` wraps `matrix-nio`'s `sync_forever` in a supervised loop with exponential backoff and consumes these `to_device` events as they arrive. Running it under systemd keeps the store always up-to-date.
 
 ```bash
 systemctl --user enable --now clawd-beeper-sync.service
 journalctl --user -u clawd-beeper-sync -f
 ```
 
-Resource footprint: ~35 MB RAM idle, negligible CPU.
+Resource footprint: ~37 MB RAM idle, negligible CPU.
+
+**Do I strictly need the daemon 24/7?** If you only ever sync interactively and never go more than a few days without running *some* client, you'll usually be fine — but for unattended agents, cron jobs, or daily digests, run the daemon.
 
 ## Security model
 
@@ -205,7 +232,7 @@ You're driving someone else's Messenger. Act like a guest in their house, not a 
 - **Schema warnings flood** on sync (`'events' is a required property`): hungryserv returns fields nio's validator doesn't recognize. Silenced by default.
 - **"Notes to self" chats** (e.g. "Facebook Messenger (Your Name)") don't have a real external recipient; bridges return `m.event_not_handled` on send. Not a bug.
 - **First message to a fresh room** may take 1-2 extra seconds as Megolm group sessions negotiate.
-- **History decryption for messages sent before the sync daemon started** may be unavailable unless the sender re-shares keys.
+- **History decryption for messages predating the key backup import or daemon startup**: the backup covers sessions Beeper Desktop archived; inactive rooms without any backed-up session remain unreadable until the next `to_device` event for that room lands while the daemon is active.
 - **Relies on Beeper's cloud bridges.** If Beeper changes their policy or goes down, self-hosted bridges (`bbctl run sh-<bridge>`) are a fallback — your recovery/token survives the migration.
 
 ## Files
@@ -220,6 +247,7 @@ unbridled/
 │   ├── nio_client.py                async E2EE client (send/list/history)
 │   ├── client.py                    sync HTTP wrapper (no e2ee, list + bridge state)
 │   ├── bootstrap_crosssign.py       recovery key → device signature
+│   ├── import_key_backup.py         recovery key → download + decrypt Matrix key backup
 │   ├── verify_interactive.py        SAS verification fallback
 │   ├── sync_daemon.py               long-running sync (Megolm accumulation)
 │   └── collect_beeper_daily.py      daily digest generator
@@ -230,6 +258,11 @@ unbridled/
     ├── setup-checklist.md           step-by-step for humans
     └── architecture.md              diagrams and crypto flow
 ```
+
+## Changelog
+
+- **v0.2.0** — 2026-04-18 — Added `import_key_backup.py` so incoming history actually decrypts (357/357 sessions imported on a real Beeper account, 95% room coverage). Fixed `list-chats --network X` that was returning 0 because of Beeper's lazy sync — now iterates `joined_rooms()` directly. Documented the two known libolm gotchas: HKDF salt is a single `0x00` byte (not 32), and the MAC is computed on empty input (not on the ciphertext).
+- **v0.1.0** — 2026-04-18 — Initial release. Send across Messenger / WhatsApp / IG / LinkedIn / Twitter worked on cross-signed device; history decryption was partial.
 
 ## Roadmap
 

@@ -144,6 +144,22 @@ ls ~/.openclaw/workspace/scripts/beeper/
 
 After this step, Beeper's bridges trust the agent's device and will relay messages to the external networks.
 
+### 6. Import the Matrix key backup (required for reading history)
+
+Cross-signing only handles *outgoing* messages. To decrypt *incoming* history,
+import the server-side Megolm key backup into the local Olm store. Stop the
+sync daemon first to avoid a write conflict on the sqlite store.
+
+```bash
+systemctl --user stop clawd-beeper-sync 2>/dev/null || true
+~/.venvs/beeper/bin/python ~/.openclaw/workspace/scripts/beeper/import_key_backup.py
+systemctl --user start clawd-beeper-sync
+# Expected: "✓ Imported N sessions into ~/.local/share/clawd-matrix/"
+```
+
+You only need to run this once per device (sessions accumulate in the store).
+Re-run it after any `bbctl login` that issued a new device id.
+
 ## Daily usage
 
 All commands run inside the venv:
@@ -218,6 +234,7 @@ unbridled/
 │   ├── client.py                         sync HTTP wrapper (list + bridge state)
 │   ├── nio_client.py                     async E2EE client (send/list/history)
 │   ├── bootstrap_crosssign.py            one-shot: recovery key → cross-sign
+│   ├── import_key_backup.py              one-shot: recovery key → import Megolm backup
 │   ├── verify_interactive.py             fallback: SAS via Beeper Desktop
 │   ├── sync_daemon.py                    long-running sync (Megolm accumulation)
 │   └── collect_beeper_daily.py           daily digest generator
@@ -231,13 +248,28 @@ unbridled/
 
 ## Status
 
-- v0.1.0 — 2026-04-18 — Works for send on cross-signed device. History (megolm decrypt) partial. Multi-platform: Messenger / WhatsApp / IG / LinkedIn / Twitter confirmed on an active Beeper account.
+- v0.2.0 — 2026-04-18 — Full send + read across Messenger / WhatsApp / IG / LinkedIn / Twitter after `import_key_backup.py` was added. Confirmed decrypting >95% of joined rooms on an active Beeper account (357/357 backup sessions imported, 0 errors).
+- v0.1.0 — 2026-04-18 — Works for send on cross-signed device. History (megolm decrypt) partial.
 
-## Inbound decryption — the sync daemon
+## Inbound decryption — key backup + sync daemon
 
-Beeper enforces E2EE on outgoing, but also means inbound messages stay encrypted until your device has received the right Megolm group sessions (via `to_device` events during a sync). Short-lived scripts miss most of them.
+Two complementary mechanisms feed Megolm group sessions into the local Olm
+store so inbound history can be decrypted:
 
-`scripts/sync_daemon.py` + `systemd/clawd-beeper-sync.service` provide a supervised long-running sync that accumulates these sessions. After a few minutes of running, `history` and `collect_beeper_daily.py` will decrypt nearly all new traffic.
+1. **Matrix key backup** (`m.megolm_backup.v1.curve25519-aes-sha2`): Beeper
+   keeps a server-side, encrypted-at-rest backup of every Megolm session the
+   user has ever held. `import_key_backup.py` downloads those, decrypts them
+   with the recovery key (same key used for cross-signing), and injects each
+   one into the nio sqlite store. One-shot, imports the entire history.
+2. **Live sync daemon** (`sync_daemon.py`, systemd-supervised): runs
+   `sync_forever` against hungryserv. Beeper's bridges push new sessions via
+   `to_device` events as they're created, which the daemon stores. Keeps
+   everything up-to-date for future messages.
+
+After the one-shot backup import and a minute or two of the daemon running,
+`history` and `collect_beeper_daily.py` decrypt nearly all traffic. Coverage
+is typically ≥ 95% of joined rooms (the rest being inactive rooms that had
+no session in the backup).
 
 Install:
 ```bash
