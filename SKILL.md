@@ -1,7 +1,7 @@
 ---
 name: unbridled
 description: Send and read messages on Facebook Messenger, WhatsApp, Instagram, LinkedIn, Twitter/X, Signal, Telegram, Discord and other networks through a Beeper account, using the cloud Matrix bridges (hungryserv). Installs bbctl, sets up E2EE with matrix-nio, bootstraps cross-signing from the user's Beeper recovery key, runs a long-running sync daemon for incoming decryption, and exposes a single Python wrapper to list/search/send/read chats across all bridged networks.
-version: 0.2.1
+version: 0.2.2
 author: clawd + jeremie
 homepage: https://github.com/jkobject/unbridled
 tags: [messaging, beeper, matrix, e2ee, facebook-messenger, whatsapp, instagram, linkedin, multi-platform]
@@ -278,6 +278,7 @@ unbridled/
 
 ## Status
 
+- v0.2.2 — 2026-04-21 — Fix packaged-skill path resolution in `collect_beeper_daily.py` (`scripts/client.py` and `scripts/nio_client.py` live next to the collector, not under `scripts/beeper/`). Validated by running the collector directly from the published skill layout.
 - v0.2.1 — 2026-04-21 — Fix false `decryption unavailable` in `collect_beeper_daily.py` by over-fetching a small history window instead of using the raw recent-event count as the decrypt limit. Validated on Messenger + WhatsApp groups where the latest raw event was reaction/meta noise.
 - v0.2.0 — 2026-04-18 — Full send + read across Messenger / WhatsApp / IG / LinkedIn / Twitter after `import_key_backup.py` was added. Confirmed decrypting >95% of joined rooms on an active Beeper account (357/357 backup sessions imported, 0 errors).
 - v0.1.0 — 2026-04-18 — Works for send on cross-signed device. History (megolm decrypt) partial.

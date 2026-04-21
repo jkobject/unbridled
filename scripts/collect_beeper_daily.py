@@ -30,8 +30,8 @@ from pathlib import Path
 
 BBCTL_CFG = Path.home() / ".config" / "bbctl" / "config.json"
 NIO_PY = Path.home() / ".venvs" / "beeper" / "bin" / "python"
-CLIENT_PY = Path(__file__).parent / "beeper" / "client.py"
-NIO_CLIENT_PY = Path(__file__).parent / "beeper" / "nio_client.py"
+CLIENT_PY = Path(__file__).with_name("client.py")
+NIO_CLIENT_PY = Path(__file__).with_name("nio_client.py")
 
 NETWORK_LABELS = {
     "messenger": "Facebook Messenger",
