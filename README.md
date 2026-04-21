@@ -232,6 +232,7 @@ You're driving someone else's Messenger. Act like a guest in their house, not a 
 - **Schema warnings flood** on sync (`'events' is a required property`): hungryserv returns fields nio's validator doesn't recognize. Silenced by default.
 - **"Notes to self" chats** (e.g. "Facebook Messenger (Your Name)") don't have a real external recipient; bridges return `m.event_not_handled` on send. Not a bug.
 - **First message to a fresh room** may take 1-2 extra seconds as Megolm group sessions negotiate.
+- **Do not set the decrypt window from the raw recent-event count.** If a room has only 1 recent raw Matrix event, that event may be a reaction or bridge/meta event, not the text message you actually want. Digest/collector code should over-fetch a small history window (`history --limit >= 10`) to avoid false `decryption unavailable` reports.
 - **History decryption for messages predating the key backup import or daemon startup**: the backup covers sessions Beeper Desktop archived; inactive rooms without any backed-up session remain unreadable until the next `to_device` event for that room lands while the daemon is active.
 - **Relies on Beeper's cloud bridges.** If Beeper changes their policy or goes down, self-hosted bridges (`bbctl run sh-<bridge>`) are a fallback — your recovery/token survives the migration.
 

@@ -202,7 +202,11 @@ def collect_network(network: str, hours: int, creds: dict, chats_limit: int, per
         lines.append(f"- room: `{a['room_id']}`")
 
         # Try to decrypt a handful (may fail silently for old events)
-        decrypted = try_decrypt_batch(a["room_id"], limit=min(a["count"], 10))
+        # `count` is the number of recent encrypted/message events seen via raw Matrix.
+        # With very small counts (e.g. 1), asking nio history for `limit=1` can miss the
+        # actual text message because the newest event may be bridge/meta noise. Always
+        # over-fetch a small window for decryption.
+        decrypted = try_decrypt_batch(a["room_id"], limit=max(10, min(a["count"] * 4, 20)))
         if decrypted:
             shown = 0
             for m in decrypted[:10]:

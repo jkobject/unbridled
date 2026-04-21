@@ -1,7 +1,7 @@
 ---
 name: unbridled
 description: Send and read messages on Facebook Messenger, WhatsApp, Instagram, LinkedIn, Twitter/X, Signal, Telegram, Discord and other networks through a Beeper account, using the cloud Matrix bridges (hungryserv). Installs bbctl, sets up E2EE with matrix-nio, bootstraps cross-signing from the user's Beeper recovery key, runs a long-running sync daemon for incoming decryption, and exposes a single Python wrapper to list/search/send/read chats across all bridged networks.
-version: 0.2.0
+version: 0.2.1
 author: clawd + jeremie
 homepage: https://github.com/jkobject/unbridled
 tags: [messaging, beeper, matrix, e2ee, facebook-messenger, whatsapp, instagram, linkedin, multi-platform]
@@ -175,13 +175,19 @@ SCRIPT="$SKILL_DIR/scripts/nio_client.py"
 # Identity check
 $NIO $SCRIPT whoami
 
-# List chats for a specific network
+# List chats for a specific network (shows room name, which is often missing for DMs)
 $NIO $SCRIPT list-chats --network messenger --limit 25
 $NIO $SCRIPT list-chats --network whatsapp  --limit 50
 $NIO $SCRIPT list-chats --network linkedin
 
 # Aliases accepted: messenger/facebook/fb, whatsapp/wa, instagram/ig,
 # linkedin, twitter/x, signal, telegram, discord
+
+# ⚠️  IMPORTANT: DMs on Beeper usually have NO room name (listed as !xxx:beeper.local).
+# The contact name lives in a member's display_name. To find a chat by contact, use:
+$NIO $SCRIPT search-chats baptiste                     # scans all 344 rooms + members
+$NIO $SCRIPT search-chats juliette --network messenger # restrict to one bridge
+$NIO $SCRIPT search-chats "jean-baptiste" --json        # structured output
 
 # Send a message (E2EE handled automatically)
 $NIO $SCRIPT send --room '!xxx:beeper.local' --text "Hello from clawd"
@@ -216,6 +222,7 @@ asyncio.run(ping())
 - **Bridge trust**: without cross-signing, Beeper bridges reject outgoing messages with `com.beeper.undecryptable_event` / `your device is not trusted (unverified)`. `bootstrap_crosssign.py` fixes this once and for all for this device.
 - **"Notes to self" chats don't relay**: the `Facebook Messenger (Jérémie Kalfon)` auto-chat has no external recipient. Test sends on a chat with a real other user.
 - **First message to a new chat**: may take 1-2 seconds extra as nio establishes the Megolm group session.
+- **Small recent-activity counts can be misleading**: when a room has only 1 recent raw Matrix event, that event may be a reaction or bridge/meta event rather than the actual text message. Digest/collector code should over-fetch (`history --limit >= 10`) instead of mirroring the raw count, otherwise it can report a false `decryption unavailable`.
 - **Recovery key != SSH key**: this is a secret that lets *anyone with it* impersonate the user on all Beeper-bridged networks. Handle accordingly.
 
 ## Safety rules for the agent
@@ -271,6 +278,7 @@ unbridled/
 
 ## Status
 
+- v0.2.1 — 2026-04-21 — Fix false `decryption unavailable` in `collect_beeper_daily.py` by over-fetching a small history window instead of using the raw recent-event count as the decrypt limit. Validated on Messenger + WhatsApp groups where the latest raw event was reaction/meta noise.
 - v0.2.0 — 2026-04-18 — Full send + read across Messenger / WhatsApp / IG / LinkedIn / Twitter after `import_key_backup.py` was added. Confirmed decrypting >95% of joined rooms on an active Beeper account (357/357 backup sessions imported, 0 errors).
 - v0.1.0 — 2026-04-18 — Works for send on cross-signed device. History (megolm decrypt) partial.
 

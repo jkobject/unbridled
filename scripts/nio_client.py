@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import stat
 import sys
 import time
@@ -203,6 +204,92 @@ async def cmd_list_chats(args) -> int:
     return 0
 
 
+async def _fetch_room_info(client: AsyncClient, room_id: str, self_user_id: str) -> dict | None:
+    """Fetch bridge state + members for one room. Returns None on error."""
+    bridge_state, members_resp = await asyncio.gather(
+        client.room_get_state_event(room_id, "m.bridge", ""),
+        client.joined_members(room_id),
+        return_exceptions=True,
+    )
+    network = None
+    if not isinstance(bridge_state, Exception) and hasattr(bridge_state, "content"):
+        info = bridge_state.content or {}
+        network = info.get("com.beeper.bridge_name") or info.get("protocol", {}).get("id")
+    members = []
+    if not isinstance(members_resp, Exception) and hasattr(members_resp, "members"):
+        members = [
+            m for m in members_resp.members
+            if m.user_id != self_user_id
+            and "bridge bot" not in (m.display_name or "").lower()
+            and not m.user_id.startswith("@_")
+        ]
+    return {"room_id": room_id, "network": network, "members": members}
+
+
+async def cmd_search_chats(args) -> int:
+    """Scan all joined rooms and match members' display_name against a regex.
+
+    DMs on Beeper have no room name — the contact identity lives in the
+    member's display_name. This command is the right way to find a room_id
+    for a given person before calling `send` or `history`.
+
+    Example patterns: "baptiste", "jean.baptiste", "kalfon|simon"
+
+    Parallelised: all rooms are fetched concurrently in batches of 50 to
+    avoid hammering hungryserv while staying fast (~3-6 s on 350 rooms).
+    """
+    client = await make_client()
+    try:
+        await sync_once(client, timeout_ms=5000)
+        joined = await client.joined_rooms()
+        room_ids = getattr(joined, "rooms", None) or []
+        target_bridge = NETWORK_ALIASES.get((args.network or "").lower(), args.network)
+
+        try:
+            pattern = re.compile(args.pattern, re.IGNORECASE)
+        except re.error as e:
+            print(f"Invalid regex pattern: {e}", file=sys.stderr)
+            return 1
+
+        # Fetch all rooms in parallel, batched to avoid overwhelming hungryserv
+        BATCH = 50
+        all_rooms: list[dict] = []
+        for i in range(0, len(room_ids), BATCH):
+            batch = room_ids[i:i + BATCH]
+            infos = await asyncio.gather(
+                *[_fetch_room_info(client, rid, client.user_id) for rid in batch]
+            )
+            all_rooms.extend(r for r in infos if r is not None)
+
+        results = []
+        for room in all_rooms:
+            if target_bridge and room["network"] != target_bridge:
+                continue
+            if args.dm_only and len(room["members"]) != 1:
+                continue
+            for m in room["members"]:
+                name = m.display_name or m.user_id
+                if pattern.search(name):
+                    results.append({
+                        "room_id": room["room_id"],
+                        "network": room["network"],
+                        "display_name": name,
+                        "user_id": m.user_id,
+                    })
+                    break  # one match per room
+
+        if args.json:
+            print(json.dumps(results, indent=2, ensure_ascii=False))
+        else:
+            print(f"{len(results)} match(es) for /{args.pattern}/:")
+            for r in results:
+                net = f"[{r['network']}]" if r['network'] else "[?]"
+                print(f"  {net:20} {r['display_name']!r:35} {r['room_id']}")
+    finally:
+        await client.close()
+    return 0
+
+
 async def cmd_send(args) -> int:
     """Send a text message. Because Beeper hungryserv does lazy sync (only
     ships rooms with recent activity), we can't rely on client.rooms being
@@ -345,6 +432,12 @@ def main() -> int:
     p_list.add_argument("--limit", type=int, default=25)
     p_list.add_argument("--json", action="store_true")
 
+    p_search = sub.add_parser("search-chats")
+    p_search.add_argument("pattern", help="regex pattern matched against member display_name")
+    p_search.add_argument("--network", help="restrict to one bridge (messenger, whatsapp, …)")
+    p_search.add_argument("--dm-only", action="store_true", help="only return 1-on-1 DMs (2 members)")
+    p_search.add_argument("--json", action="store_true")
+
     p_send = sub.add_parser("send")
     p_send.add_argument("--room", required=True)
     p_send.add_argument("--text", required=True)
@@ -357,10 +450,11 @@ def main() -> int:
     args = parser.parse_args()
 
     handlers = {
-        "whoami":     cmd_whoami,
-        "list-chats": cmd_list_chats,
-        "send":       cmd_send,
-        "history":    cmd_history,
+        "whoami":       cmd_whoami,
+        "list-chats":   cmd_list_chats,
+        "search-chats": cmd_search_chats,
+        "send":         cmd_send,
+        "history":      cmd_history,
     }
     return asyncio.run(handlers[args.cmd](args))
 
